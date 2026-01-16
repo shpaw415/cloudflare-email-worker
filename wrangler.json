@@ -1,0 +1,30 @@
+/**
+ * For more details on how to configure Wrangler, refer to:
+ * https://developers.cloudflare.com/workers/wrangler/configuration/
+ */
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "noreply-mail-worker",
+	"main": "src/index.ts",
+	"compatibility_date": "2025-09-27",
+	"observability": {
+		"enabled": true
+	},
+	"send_email": [
+		{
+			"name": "EMAIL",
+			"allowed_destination_addresses": ["<ALLOWED_EMAIL>"],
+			"remote": true
+		}
+	],
+	"vars": {
+		"RECAPTCHA_ENABLED": "true",
+		"RECAPTCHA_PROJECT_ID": "<PROJECT_ID>",
+		"RECAPTCHA_API_KEY": "<API_KEY>",
+		"RECAPTCHA_SITE_KEY": "<SITE_KEY>",
+		"TO_EMAIL": "<DEFAULT_EMAIL_ADDRESS_ROUTE>",
+		"FROM_EMAIL": "no-reply@<DOMAIN>",
+		"AUTHORIZED_ORIGINS": "<ORIGIN_1>,<ORIGIN_2>",
+		"ENABLE_LOGGING": "false"
+	}
+}

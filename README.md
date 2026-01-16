@@ -291,8 +291,7 @@ noreply-mail-worker/
 Edit `src/email-template.tsx` to customize your email design. The template receives all form data as props:
 
 ```tsx
-import type { __EmailWorkerType__ } from './types';
-import type { ReactElement } from 'react';
+import type { EmailTemplateFunction } from './types';
 
 const Template: EmailTemplateFunction = (props) => {
 	return (

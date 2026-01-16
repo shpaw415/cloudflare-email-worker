@@ -135,7 +135,7 @@ export default {
 
 		// Only allow POST requests
 		if (request.method !== 'POST') {
-			return createResponse(request, 'Méthode non autorisée.', 405, allowedOrigins);
+			return createResponse(request, 'MMethod not allowed.', 405, allowedOrigins);
 		}
 
 		let data: __EmailWorkerType__;
@@ -143,7 +143,7 @@ export default {
 			const formData = await request.formData();
 			data = Object.fromEntries(formData) as unknown as __EmailWorkerType__;
 		} catch {
-			return createResponse(request, 'Données de formulaire invalides.', 400, allowedOrigins);
+			return createResponse(request, 'Invalid form data.', 400, allowedOrigins);
 		}
 
 		const recaptchaToken = data.recaptchaToken?.trim();
@@ -154,22 +154,22 @@ export default {
 
 		// Verify reCAPTCHA first
 		if (recaptchaEnabled && !recaptchaToken) {
-			return createResponse(request, 'Token reCAPTCHA manquant.', 400, allowedOrigins);
+			return createResponse(request, 'missing reCAPTCHA Token.', 400, allowedOrigins);
 		}
 
 		try {
 			const recaptchaResult = recaptchaEnabled ? await verifyRecaptcha(recaptchaToken as string, env) : null;
 			if (recaptchaResult && !recaptchaResult.success) {
-				return createResponse(request, recaptchaResult.error || 'Vérification reCAPTCHA échouée.', 403, allowedOrigins);
+				return createResponse(request, recaptchaResult.error || 'reCAPTCHA verification failed.', 403, allowedOrigins);
 			}
 			const raw_message = createMessage(env, data).asRaw();
 			loggingEnabled && console.log(raw_message);
 			const email_message = new EmailMessage(env.FROM_EMAIL, data.to_email || env.TO_EMAIL, raw_message);
 			await env.EMAIL.send(email_message);
-			return createResponse(request, 'Email envoyé avec succès !', 200, allowedOrigins);
+			return createResponse(request, 'Email sent successfully!', 200, allowedOrigins);
 		} catch (error) {
 			console.error(error);
-			return createResponse(request, `Erreur lors de l'envoi de l'email: ${error}`, 500, allowedOrigins);
+			return createResponse(request, `Error sending email: ${error}`, 500, allowedOrigins);
 		}
 	},
 } satisfies ExportedHandler<Env>;

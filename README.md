@@ -294,7 +294,7 @@ Edit `src/email-template.tsx` to customize your email design. The template recei
 import type { __EmailWorkerType__ } from './types';
 import type { ReactElement } from 'react';
 
-export default function EmailTemplate(props: __EmailWorkerType__): ReactElement | Error {
+const Template: EmailTemplateFunction = (props) => {
 	return (
 		<html>
 			<body>
@@ -304,7 +304,7 @@ export default function EmailTemplate(props: __EmailWorkerType__): ReactElement 
 			</body>
 		</html>
 	);
-}
+};
 ```
 
 > ⚠️ **Important:** Always use inline styles in email templates. External CSS is not supported by email clients.

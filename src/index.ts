@@ -65,8 +65,8 @@ async function verifyRecaptcha(token: string, env: Env): Promise<{ success: bool
 	const siteKey = env.RECAPTCHA_SITE_KEY;
 	const loggingEnabled = (env.ENABLE_LOGGING as string) === 'true';
 
-	if (!projectId || !apiKey) {
-		console.error('Missing RECAPTCHA_PROJECT_ID or RECAPTCHA_API_KEY');
+	if (!projectId || !apiKey || !siteKey) {
+		console.error('Missing RECAPTCHA_PROJECT_ID, RECAPTCHA_API_KEY, or RECAPTCHA_SITE_KEY in environment variables.');
 		return { success: false, error: 'Configuration reCAPTCHA manquante.' };
 	}
 

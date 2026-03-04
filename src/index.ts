@@ -60,10 +60,10 @@ interface RecaptchaAssessmentResponse {
 }
 
 async function verifyRecaptcha(token: string, env: Env): Promise<{ success: boolean; score?: number; error?: string }> {
-	const projectId = env.RECAPTCHA_PROJECT_ID;
-	const apiKey = env.RECAPTCHA_API_KEY;
-	const siteKey = env.RECAPTCHA_SITE_KEY;
-	const loggingEnabled = (env.ENABLE_LOGGING as string) === 'true';
+	const projectId = env?.RECAPTCHA_PROJECT_ID as string | undefined;
+	const apiKey = env?.RECAPTCHA_API_KEY as string | undefined;
+	const siteKey = env?.RECAPTCHA_SITE_KEY as string | undefined;
+	const loggingEnabled = (env?.ENABLE_LOGGING as string) === 'true';
 
 	if (!projectId || !apiKey || !siteKey) {
 		console.error('Missing RECAPTCHA_PROJECT_ID, RECAPTCHA_API_KEY, or RECAPTCHA_SITE_KEY in environment variables.');
@@ -120,6 +120,58 @@ async function verifyRecaptcha(token: string, env: Env): Promise<{ success: bool
 	}
 }
 
+type TurnStileResponse =
+	| {
+			success: true;
+			challenge_ts: `${string}-${string}-${string}:${string}:${string}.${string}`;
+			hostname: string;
+			'error-codes': string[];
+			action: 'login';
+			cdata: `sessionid-${string}`;
+			metadata: {
+				ephemeral_id: string;
+			};
+	  }
+	| {
+			success: false;
+			'error-codes': string[];
+	  };
+
+async function verifyTurnstile(token: string, env: Env): Promise<{ success: boolean; error?: string }> {
+	const secretKey = env.TURNSTILE_SECRET_KEY;
+	const loggingEnabled = (env.ENABLE_LOGGING as string) === 'true';
+
+	if (!secretKey) {
+		console.error('Missing TURNSTILE_SECRET_KEY in environment variables.');
+		return { success: false, error: 'Configuration Turnstile manquante.' };
+	}
+
+	const formData = new URLSearchParams();
+	formData.append('secret', secretKey);
+	formData.append('response', token);
+
+	try {
+		const response = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+			body: formData.toString(),
+		});
+
+		const result = (await response.json()) as TurnStileResponse;
+
+		loggingEnabled && console.log('Turnstile result:', result);
+
+		if (!response.ok || !result.success) {
+			return { success: false, error: 'Vérification Turnstile échouée. Veuillez réessayer.' };
+		}
+
+		return { success: true };
+	} catch (error) {
+		console.error('Turnstile verification failed:', error);
+		return { success: false, error: 'Échec de la vérification Turnstile.' };
+	}
+}
+
 export default {
 	async fetch(request, env): Promise<Response> {
 		const allowedOrigins = env.AUTHORIZED_ORIGINS.split(',').map((origin) => origin.trim());
@@ -147,21 +199,51 @@ export default {
 			return createResponse(request, 'Données de formulaire invalides.', 400, allowedOrigins);
 		}
 
-		const recaptchaToken = data.recaptchaToken?.trim();
-		const recaptchaEnabled = (env.RECAPTCHA_ENABLED as string) === 'true';
 		const loggingEnabled = (env.ENABLE_LOGGING as string) === 'true';
-
 		loggingEnabled && console.log('Received data:', data);
 
-		// Verify reCAPTCHA first
-		if (recaptchaEnabled && !recaptchaToken) {
-			return createResponse(request, 'Token reCAPTCHA manquant.', 400, allowedOrigins);
-		}
+		const createVerifier: () => Response | { enabled: boolean; verify: () => Promise<{ success: boolean; error?: string }> } = () => {
+			const recaptchaToken = data.recaptchaToken?.trim();
+			const recaptchaEnabled = (env.RECAPTCHA_ENABLED as string) === 'true';
+			// Verify reCAPTCHA first
+			if (recaptchaEnabled && !recaptchaToken) {
+				return createResponse(request, 'Token reCAPTCHA manquant.', 400, allowedOrigins);
+			} else if (recaptchaEnabled)
+				return {
+					enabled: true,
+					verify: () =>
+						verifyRecaptcha(recaptchaToken!, env).then((res) => ({
+							success: res.success,
+							error: !res.success ? res.error || 'Vérification reCAPTCHA échouée.' : undefined,
+						})),
+				};
+
+			const turnstileToken = data.turnstileToken?.trim();
+			const turnstileEnabled = (env.ENABLE_TURNSTILE as string) === 'true';
+			// Verify Turnstile if enabled
+			if (turnstileEnabled && !turnstileToken) {
+				return createResponse(request, 'Token Turnstile manquant.', 400, allowedOrigins);
+			} else if (turnstileEnabled)
+				return {
+					enabled: true,
+					verify: () =>
+						verifyTurnstile(turnstileToken!, env).then((res) => ({
+							success: res.success,
+							error: !res.success ? res.error || 'Vérification Turnstile échouée.' : undefined,
+						})),
+				};
+
+			return { enabled: false, verify: () => Promise.resolve({ success: true, error: undefined }) };
+		};
 
 		try {
-			const recaptchaResult = recaptchaEnabled ? await verifyRecaptcha(recaptchaToken as string, env) : null;
-			if (recaptchaResult && !recaptchaResult.success) {
-				return createResponse(request, recaptchaResult.error || 'Vérification reCAPTCHA échouée.', 403, allowedOrigins);
+			const tokenVerifier = createVerifier();
+			if (tokenVerifier instanceof Response) {
+				return tokenVerifier;
+			}
+			const verifyResult = await tokenVerifier.verify();
+			if (verifyResult && !verifyResult.success) {
+				return createResponse(request, verifyResult.error!, 403, allowedOrigins);
 			}
 			const raw_message = createMessage(env, data).asRaw();
 			loggingEnabled && console.log(raw_message);

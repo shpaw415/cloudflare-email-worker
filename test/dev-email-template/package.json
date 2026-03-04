@@ -1,0 +1,23 @@
+{
+	"name": "dev-email-template",
+	"module": "index.ts",
+	"type": "module",
+	"private": true,
+	"devDependencies": {
+		"@types/bun": "latest"
+	},
+	"peerDependencies": {
+		"typescript": "^5"
+	},
+	"dependencies": {
+		"@types/react-dom": "^19.2.3",
+		"frame-master": "^3.1.1",
+		"frame-master-plugin-env-in-html": "^0.1.1",
+		"react-dom": "^19.2.4"
+	},
+	"scripts": {
+		"dev": "NODE_ENV=development bun --hot frame-master dev",
+		"start": "NODE_ENV=production bun frame-master start",
+		"build": "bun frame-master build"
+	}
+}

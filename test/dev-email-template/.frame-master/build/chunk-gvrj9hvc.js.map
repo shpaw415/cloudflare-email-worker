@@ -1,0 +1,10 @@
+{
+  "version": 3,
+  "sources": ["../../hmr.ts"],
+  "sourcesContent": [
+    "const ws = new WebSocket(`ws://localhost:${process.env.PORT}/ws`);\n\nws.addEventListener('message', (event) => {\n\tif (event.data === 'reload') {\n\t\twindow.location.reload();\n\t}\n});\n"
+  ],
+  "mappings": ";AAAA,IAAM,KAAK,IAAI,UAAU,kBAAkB,QAAQ,IAAI,SAAS;AAEhE,GAAG,iBAAiB,WAAW,CAAC,UAAU;AAAA,EACzC,IAAI,MAAM,SAAS,UAAU;AAAA,IAC5B,OAAO,SAAS,OAAO;AAAA,EACxB;AAAA,CACA;",
+  "debugId": "370907858FE4D63664756E2164756E21",
+  "names": []
+}

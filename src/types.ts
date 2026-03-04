@@ -10,6 +10,7 @@ type DataType = {
  */
 export type __EmailWorkerType__ = {
 	recaptchaToken?: string;
+	turnstileToken?: string;
 	subject?: string;
 	message: string;
 	to_email?: string;

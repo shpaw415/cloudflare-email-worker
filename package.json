@@ -1,21 +1,23 @@
 {
 	"name": "noreply-mail-worker",
-	"version": "0.0.0",
+	"version": "0.1.0",
 	"private": true,
 	"scripts": {
 		"deploy": "wrangler deploy",
 		"dev": "wrangler dev",
 		"start": "wrangler dev",
 		"test": "vitest",
-		"cf-typegen": "wrangler types"
+		"cf-typegen": "wrangler types",
+		"dev:email": "bun --cwd ./test/dev-email-template dev"
 	},
 	"devDependencies": {
 		"@cloudflare/vitest-pool-workers": "^0.8.19",
+		"@types/node": "^25.3.3",
 		"@types/react": "^19.2.8",
 		"@types/react-dom": "^19.2.3",
 		"typescript": "^5.5.2",
 		"vitest": "~3.2.0",
-		"wrangler": "^4.59.2"
+		"wrangler": "^4.70.0"
 	},
 	"dependencies": {
 		"mimetext": "^3.0.27",

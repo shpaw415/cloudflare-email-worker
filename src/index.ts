@@ -14,25 +14,86 @@ function createResponse(request: Request, body: BodyInit, status: number, allowe
 	return new Response(body, { status, headers: { 'Content-Type': 'text/plain', 'Access-Control-Allow-Origin': corsOrigin } });
 }
 
-function createMessage(env: Env, data: __EmailWorkerType__) {
+function traceId(request: Request): string {
+	return request.headers.get('cf-ray') || crypto.randomUUID();
+}
+
+function describeError(error: unknown): { name?: string; code?: string; message: string; stack?: string } {
+	if (error instanceof Error) {
+		const coded = error as Error & { code?: string };
+		return {
+			name: coded.name,
+			code: coded.code,
+			message: coded.message,
+			stack: coded.stack,
+		};
+	}
+	return { message: String(error) };
+}
+
+function logFailure(step: string, id: string, error: unknown, context: Record<string, unknown>): void {
+	const details = describeError(error);
+	const message = details.message.replace(/\s+/g, ' ');
+	console.error(`mail-worker ${step} failed trace=${id} code=${details.code ?? 'none'} message=${message}`);
+	console.error(JSON.stringify({ traceId: id, step, error: details, context }));
+}
+
+function foldBase64(value: string): string {
+	return value.replace(/.{1,76}/g, '$&\r\n').replace(/\r\n$/, '');
+}
+
+function encodeBase64(value: string): string {
+	const bytes = new TextEncoder().encode(value.replace(/\r?\n/g, '\r\n'));
+	let binary = '';
+	for (const byte of bytes) binary += String.fromCharCode(byte);
+	return foldBase64(btoa(binary));
+}
+
+function hasNonAscii(value: string): boolean {
+	return /[^\u0000-\u007f]/.test(value);
+}
+
+const OMITTED_PLAIN_TEXT_FIELDS = new Set(['recaptchaToken', 'turnstileToken', 'to_email', 'subject']);
+
+function plainText(data: __EmailWorkerType__): string {
+	return Object.entries(data)
+		.filter((entry): entry is [string, string] => {
+			const [key, value] = entry;
+			return !OMITTED_PLAIN_TEXT_FIELDS.has(key) && typeof value === 'string' && value.length > 0;
+		})
+		.map(([key, value]) => `${key}: ${value}`)
+		.join('\r\n');
+}
+
+function formHadNonAscii(data: __EmailWorkerType__, subject: string): boolean {
+	const values = Object.entries(data)
+		.filter(([key, value]) => key !== 'recaptchaToken' && key !== 'turnstileToken' && typeof value === 'string')
+		.map(([, value]) => value);
+	return hasNonAscii([subject, ...values].join(''));
+}
+
+export function createMessage(env: Env, data: __EmailWorkerType__) {
 	const EmailTemplateResult = EmailTemplate(data);
 	if (EmailTemplateResult instanceof Error) {
 		throw new Error(`Email template error: ${EmailTemplateResult.message}`);
 	}
 
+	const html = typeof EmailTemplateResult === 'string' ? undefined : renderToStaticMarkup(EmailTemplateResult);
+	const text = typeof EmailTemplateResult === 'string' ? EmailTemplateResult : plainText(data);
 	const msg = createMimeMessage();
 	msg.setSender(env.FROM_EMAIL);
 	msg.setRecipient(data.to_email?.trim() || env.TO_EMAIL);
 	msg.setSubject(data.subject || 'New Contact Form Submission');
-	if (typeof EmailTemplateResult === 'string') {
-		msg.addMessage({
-			contentType: 'text/plain',
-			data: EmailTemplateResult.split('\n').join('\r\n'),
-		});
-	} else {
+	msg.addMessage({
+		contentType: 'text/plain',
+		encoding: 'base64',
+		data: encodeBase64(text),
+	});
+	if (html) {
 		msg.addMessage({
 			contentType: 'text/html',
-			data: renderToStaticMarkup(EmailTemplateResult).split('\n').join('\r\n'),
+			encoding: 'base64',
+			data: encodeBase64(html),
 		});
 	}
 	return msg;
@@ -59,15 +120,20 @@ interface RecaptchaAssessmentResponse {
 	};
 }
 
-async function verifyRecaptcha(token: string, env: Env): Promise<{ success: boolean; score?: number; error?: string }> {
+type VerifyResult = { success: boolean; score?: number; error?: string; detail?: string };
+
+async function verifyRecaptcha(token: string, env: Env): Promise<VerifyResult> {
 	const projectId = env?.RECAPTCHA_PROJECT_ID as string | undefined;
 	const apiKey = env?.RECAPTCHA_API_KEY as string | undefined;
 	const siteKey = env?.RECAPTCHA_SITE_KEY as string | undefined;
 	const loggingEnabled = (env?.ENABLE_LOGGING as string) === 'true';
 
 	if (!projectId || !apiKey || !siteKey) {
-		console.error('Missing RECAPTCHA_PROJECT_ID, RECAPTCHA_API_KEY, or RECAPTCHA_SITE_KEY in environment variables.');
-		return { success: false, error: 'Configuration reCAPTCHA manquante.' };
+		return {
+			success: false,
+			error: 'Configuration reCAPTCHA manquante.',
+			detail: 'Missing RECAPTCHA_PROJECT_ID, RECAPTCHA_API_KEY, or RECAPTCHA_SITE_KEY',
+		};
 	}
 
 	const requestBody = {
@@ -90,8 +156,11 @@ async function verifyRecaptcha(token: string, env: Env): Promise<{ success: bool
 		const result: RecaptchaAssessmentResponse = await response.json();
 
 		if (!response.ok) {
-			console.error('reCAPTCHA API error:', result);
-			return { success: false, error: 'Erreur de vérification reCAPTCHA.' };
+			return {
+				success: false,
+				error: 'Erreur de vérification reCAPTCHA.',
+				detail: `status=${response.status} message=${result.error?.message ?? 'none'}`,
+			};
 		}
 
 		const tokenValid = result.tokenProperties?.valid ?? false;
@@ -108,15 +177,13 @@ async function verifyRecaptcha(token: string, env: Env): Promise<{ success: bool
 			return { success: false, score, error: 'Action reCAPTCHA non correspondante.' };
 		}
 
-		// Score threshold: 0.5 is a reasonable default (0.0 = bot, 1.0 = human)
 		if (score < 0.5) {
 			return { success: false, score, error: 'Score reCAPTCHA trop bas. Veuillez réessayer.' };
 		}
 
 		return { success: true, score };
 	} catch (error) {
-		console.error('reCAPTCHA verification failed:', error);
-		return { success: false, error: 'Échec de la vérification reCAPTCHA.' };
+		return { success: false, error: 'Échec de la vérification reCAPTCHA.', detail: describeError(error).message };
 	}
 }
 
@@ -137,13 +204,12 @@ type TurnStileResponse =
 			'error-codes': string[];
 	  };
 
-async function verifyTurnstile(token: string, env: Env): Promise<{ success: boolean; error?: string }> {
+async function verifyTurnstile(token: string, env: Env): Promise<VerifyResult> {
 	const secretKey = env.TURNSTILE_SECRET_KEY;
 	const loggingEnabled = (env.ENABLE_LOGGING as string) === 'true';
 
 	if (!secretKey) {
-		console.error('Missing TURNSTILE_SECRET_KEY in environment variables.');
-		return { success: false, error: 'Configuration Turnstile manquante.' };
+		return { success: false, error: 'Configuration Turnstile manquante.', detail: 'Missing TURNSTILE_SECRET_KEY' };
 	}
 
 	const formData = new URLSearchParams();
@@ -159,23 +225,33 @@ async function verifyTurnstile(token: string, env: Env): Promise<{ success: bool
 
 		const result = (await response.json()) as TurnStileResponse;
 
-		loggingEnabled && console.log('Turnstile result:', result);
+		loggingEnabled &&
+			console.log('Turnstile result:', {
+				success: result.success,
+				errorCodes: result.success ? [] : result['error-codes'],
+			});
 
 		if (!response.ok || !result.success) {
-			return { success: false, error: 'Vérification Turnstile échouée. Veuillez réessayer.' };
+			const codes = result.success ? [] : result['error-codes'];
+			return {
+				success: false,
+				error: 'Vérification Turnstile échouée. Veuillez réessayer.',
+				detail: `status=${response.status} codes=${codes.join(',') || 'none'}`,
+			};
 		}
 
 		return { success: true };
 	} catch (error) {
-		console.error('Turnstile verification failed:', error);
-		return { success: false, error: 'Échec de la vérification Turnstile.' };
+		return { success: false, error: 'Échec de la vérification Turnstile.', detail: describeError(error).message };
 	}
 }
 
 export default {
 	async fetch(request, env): Promise<Response> {
-		const allowedOrigins = env.AUTHORIZED_ORIGINS.split(',').map((origin) => origin.trim());
-		// Handle preflight requests
+		const id = traceId(request);
+		const allowedOrigins = env.AUTHORIZED_ORIGINS.split(',')
+			.map((origin) => origin.trim())
+			.filter(Boolean);
 		if (request.method === 'OPTIONS') {
 			return new Response(null, {
 				headers: {
@@ -186,56 +262,61 @@ export default {
 			});
 		}
 
-		// Only allow POST requests
 		if (request.method !== 'POST') {
-			return createResponse(request, 'Méthode non autorisée.', 405, allowedOrigins);
+			console.error(`mail-worker method rejected trace=${id} method=${request.method}`);
+			return createResponse(request, `Méthode non autorisée. Référence ${id}.`, 405, allowedOrigins);
 		}
 
 		let data: __EmailWorkerType__;
 		try {
 			const formData = await request.formData();
 			data = Object.fromEntries(formData) as unknown as __EmailWorkerType__;
-		} catch {
-			return createResponse(request, 'Données de formulaire invalides.', 400, allowedOrigins);
+		} catch (error) {
+			logFailure('parse-form', id, error, {
+				contentType: request.headers.get('content-type'),
+				origin: request.headers.get('origin'),
+			});
+			return createResponse(request, `Données de formulaire invalides. Référence ${id}.`, 400, allowedOrigins);
 		}
 
 		const loggingEnabled = (env.ENABLE_LOGGING as string) === 'true';
-		loggingEnabled && console.log('Received data:', data);
+		if (loggingEnabled) {
+			const { recaptchaToken, turnstileToken, ...safe } = data;
+			console.log('Received data:', {
+				...safe,
+				recaptchaToken: recaptchaToken ? '[redacted]' : undefined,
+				turnstileToken: turnstileToken ? '[redacted]' : undefined,
+			});
+		}
 
-		const createVerifier: () => Response | { enabled: boolean; verify: () => Promise<{ success: boolean; error?: string }> } = () => {
+		const createVerifier: () => Response | { enabled: boolean; verify: () => Promise<VerifyResult> } = () => {
 			const recaptchaToken = data.recaptchaToken?.trim();
 			const recaptchaEnabled = (env.RECAPTCHA_ENABLED as string) === 'true';
-			// Verify reCAPTCHA first
 			if (recaptchaEnabled && !recaptchaToken) {
-				return createResponse(request, 'Token reCAPTCHA manquant.', 400, allowedOrigins);
+				logFailure('missing-token', id, 'Token reCAPTCHA manquant.', { origin: request.headers.get('origin') });
+				return createResponse(request, `Token reCAPTCHA manquant. Référence ${id}.`, 400, allowedOrigins);
 			} else if (recaptchaEnabled)
 				return {
 					enabled: true,
-					verify: () =>
-						verifyRecaptcha(recaptchaToken!, env).then((res) => ({
-							success: res.success,
-							error: !res.success ? res.error || 'Vérification reCAPTCHA échouée.' : undefined,
-						})),
+					verify: () => verifyRecaptcha(recaptchaToken!, env),
 				};
 
 			const turnstileToken = data.turnstileToken?.trim();
 			const turnstileEnabled = (env.ENABLE_TURNSTILE as string) === 'true';
-			// Verify Turnstile if enabled
 			if (turnstileEnabled && !turnstileToken) {
-				return createResponse(request, 'Token Turnstile manquant.', 400, allowedOrigins);
+				logFailure('missing-token', id, 'Token Turnstile manquant.', { origin: request.headers.get('origin') });
+				return createResponse(request, `Token Turnstile manquant. Référence ${id}.`, 400, allowedOrigins);
 			} else if (turnstileEnabled)
 				return {
 					enabled: true,
-					verify: () =>
-						verifyTurnstile(turnstileToken!, env).then((res) => ({
-							success: res.success,
-							error: !res.success ? res.error || 'Vérification Turnstile échouée.' : undefined,
-						})),
+					verify: () => verifyTurnstile(turnstileToken!, env),
 				};
 
-			return { enabled: false, verify: () => Promise.resolve({ success: true, error: undefined }) };
+			return { enabled: false, verify: () => Promise.resolve({ success: true }) };
 		};
 
+		const to = data.to_email?.trim() || env.TO_EMAIL;
+		const subject = data.subject || 'New Contact Form Submission';
 		try {
 			const tokenVerifier = createVerifier();
 			if (tokenVerifier instanceof Response) {
@@ -243,16 +324,29 @@ export default {
 			}
 			const verifyResult = await tokenVerifier.verify();
 			if (verifyResult && !verifyResult.success) {
-				return createResponse(request, verifyResult.error!, 403, allowedOrigins);
+				logFailure('verify', id, verifyResult.detail || verifyResult.error || 'unknown', {
+					origin: request.headers.get('origin'),
+				});
+				return createResponse(request, `${verifyResult.error ?? 'Vérification échouée.'} Référence ${id}.`, 403, allowedOrigins);
 			}
 			const raw_message = createMessage(env, data).asRaw();
 			loggingEnabled && console.log(raw_message);
-			const email_message = new EmailMessage(env.FROM_EMAIL, data.to_email || env.TO_EMAIL, raw_message);
+			const email_message = new EmailMessage(env.FROM_EMAIL, to, raw_message);
 			await env.EMAIL.send(email_message);
+			console.log(`mail-worker sent trace=${id} to=${to} bytes=${raw_message.length}`);
 			return createResponse(request, 'Email envoyé avec succès !', 200, allowedOrigins);
 		} catch (error) {
-			console.error(error);
-			return createResponse(request, `Erreur lors de l'envoi de l'email: ${error}`, 500, allowedOrigins);
+			const details = describeError(error);
+			logFailure('send', id, error, {
+				from: env.FROM_EMAIL,
+				to,
+				subject,
+				origin: request.headers.get('origin'),
+				messageLength: data.message?.length ?? 0,
+				nonAscii: formHadNonAscii(data, subject),
+			});
+			const code = details.code ? ` (${details.code})` : '';
+			return createResponse(request, `Erreur lors de l'envoi de l'email${code}. Référence ${id}.`, 500, allowedOrigins);
 		}
 	},
 } satisfies ExportedHandler<Env>;
